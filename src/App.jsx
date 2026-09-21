@@ -4,19 +4,19 @@ import * as tf from "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
 import "./App.css";
 
-// Color palette mapping to match multi-class dataset visualizations
 const CLASS_COLORS = {
-  person: "#E040FB",        // Magenta
-  car: "#FFEB3B",           // Yellow
-  truck: "#76FF03",         // Light Green
-  bus: "#FF4081",           // Pink
-  bicycle: "#00E5FF",       // Cyan
-  motorcycle: "#FF9100",    // Deep Orange
-  "traffic light": "#2979FF", // Blue
-  handbag: "#00E676",       // Green
-  backpack: "#00E676",      // Green
-  cell_phone: "#FF1744",    // Bright Red
-  default: "#00E676"        // Fallback Green
+  person: "#E040FB",
+  car: "#FFEB3B",
+  truck: "#76FF03",
+  bus: "#FF4081",
+  bicycle: "#00E5FF",
+  motorcycle: "#FF9100",
+  "traffic light": "#2979FF",
+  handbag: "#00E676",
+  backpack: "#00E676",
+  cell_phone: "#FF1744",
+  laptop: "#FF1744",
+  default: "#00E676"
 };
 
 function App() {
@@ -25,14 +25,14 @@ function App() {
   const [model, setModel] = useState(null);
   const [modelLoading, setModelLoading] = useState(true);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [facingMode, setFacingMode] = useState("user"); // Toggle between "user" and "environment"
+  const [facingMode, setFacingMode] = useState("environment"); // Default to rear camera for mobile
 
-  // 1. Initialize TensorFlow Backend and Load Model
   useEffect(() => {
     const loadModel = async () => {
       try {
         await tf.ready();
-        // Load MobileNetV2 architecture for high FPS edge inference
+        // Force WebGL backend for better mobile GPU acceleration
+        await tf.setBackend('webgl'); 
         const loadedModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
         setModel(loadedModel);
         setModelLoading(false);
@@ -47,7 +47,6 @@ function App() {
     setIsStreaming(true);
   }, []);
 
-  // 2. Real-Time Inference Loop
   useEffect(() => {
     if (!isStreaming || modelLoading || !model) return;
 
@@ -63,7 +62,7 @@ function App() {
         return;
       }
 
-      // Synchronize internal canvas resolution with video stream
+      // Sync canvas dimensions to the dynamic video feed
       if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -72,44 +71,37 @@ function App() {
       const ctx = canvas.getContext("2d");
       const startTime = performance.now();
 
-      // Run inference directly on the HTMLVideoElement
-      const predictions = await model.detect(video, 20, 0.40);
+      // LOWERED THRESHOLD: Changed from 0.40 to 0.30 so the mobile camera catches objects easier
+      const predictions = await model.detect(video, 20, 0.30);
 
-      // Clear the transparent canvas overlay
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Render bounding boxes and semantic tags
       predictions.forEach((prediction) => {
         const [x, y, width, height] = prediction.bbox;
         const className = prediction.class;
         const score = Math.round(prediction.score * 100);
         const color = CLASS_COLORS[className] || CLASS_COLORS.default;
 
-        // Draw Bounding Box
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;
         ctx.strokeRect(x, y, width, height);
 
-        // Draw Label Tag Background
         const label = `${className} ${score}%`;
-        ctx.font = "bold 14px monospace";
+        ctx.font = "bold 16px monospace";
         const textWidth = ctx.measureText(label).width;
-        const tagHeight = 20;
+        const tagHeight = 22;
 
         ctx.fillStyle = color;
         ctx.fillRect(x, Math.max(0, y - tagHeight), textWidth + 10, tagHeight);
 
-        // Draw Text Inside Tag
         ctx.fillStyle = "#000000";
-        ctx.fillText(label, x + 5, Math.max(14, y - 5));
+        ctx.fillText(label, x + 5, Math.max(16, y - 4));
       });
 
-      // Calculate performance telemetry
       const inferenceLatency = performance.now() - startTime;
       const currentFps = 1000 / (performance.now() - lastFrameTime);
       lastFrameTime = performance.now();
 
-      // Render Telemetry Banner
       ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
       ctx.fillRect(10, 10, 240, 50);
 
@@ -125,27 +117,23 @@ function App() {
 
     detectFrame();
 
-    return () => {
-      cancelAnimationFrame(animationId);
-    };
+    return () => cancelAnimationFrame(animationId);
   }, [isStreaming, modelLoading, model]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", backgroundColor: "#0f1117", color: "#fff", minHeight: "100vh", padding: "16px", fontFamily: "sans-serif" }}>
-      <h2 style={{ margin: "10px 0" }}>COCO Deep Learning Detector</h2>
+      <h3 style={{ margin: "5px 0" }}>LiveObject Detector</h3>
       
-      <div style={{ position: "relative", width: "100%", maxWidth: "640px", borderRadius: "8px", overflow: "hidden", border: "2px solid #2d3748" }}>
+      {/* Container updated for dynamic mobile aspect ratios */}
+      <div style={{ position: "relative", width: "100%", maxWidth: "100vw", borderRadius: "8px", overflow: "hidden", border: "2px solid #2d3748" }}>
         <Webcam
           audio={false}
           ref={webcamRef}
           screenshotFormat="image/jpeg"
-          videoConstraints={{
-            width: 640,
-            height: 480,
-            facingMode: facingMode
-          }}
+          // Removed hardcoded width/height to prevent stretching
+          videoConstraints={{ facingMode: facingMode }} 
           onUserMedia={handleUserMedia}
-          style={{ width: "100%", display: "block" }}
+          style={{ width: "100%", height: "auto", display: "block" }}
         />
         <canvas
           ref={canvasRef}
@@ -156,14 +144,14 @@ function App() {
       <div style={{ marginTop: "16px", display: "flex", gap: "10px", alignItems: "center" }}>
         <button
           onClick={() => setFacingMode((prev) => (prev === "user" ? "environment" : "user"))}
-          style={{ padding: "8px 16px", borderRadius: "6px", backgroundColor: "#2563eb", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
+          style={{ padding: "12px 20px", borderRadius: "6px", backgroundColor: "#2563eb", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
         >
           Switch to {facingMode === "user" ? "Rear Camera" : "Front Camera"}
         </button>
       </div>
 
-      {modelLoading && <p style={{ color: "#fbbf24", marginTop: "12px" }}>Loading COCO-SSD Neural Weights...</p>}
-      {!modelLoading && isStreaming && <p style={{ color: "#4ade80", marginTop: "12px" }}>● Neural Pipeline Running</p>}
+      {modelLoading && <p style={{ color: "#fbbf24", marginTop: "12px" }}>Loading Neural Weights...</p>}
+      {!modelLoading && isStreaming && <p style={{ color: "#4ade80", marginTop: "12px" }}>● Pipeline Active</p>}
     </div>
   );
 }
