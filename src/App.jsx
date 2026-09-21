@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from "react";
+     import React, { useRef, useState, useEffect, useCallback } from "react";
 import Webcam from "react-webcam";
 import * as tf from "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
@@ -19,6 +19,9 @@ const CLASS_COLORS = {
   default: "#00E676"
 };
 
+const TRAIL_LENGTH = 20; 
+const REQUIRED_FRAMES = 4; // The AI must see the object 4 frames in a row to verify it
+
 function App() {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -27,16 +30,21 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [facingMode, setFacingMode] = useState("environment"); 
   
-  // Voice Feedback State & Memory
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const speechMemory = useRef({}); 
+  const trajectoryMemory = useRef({}); 
+  
+  // New: Temporal Smoothing Memory Bank
+  const verificationMemory = useRef({});
 
   useEffect(() => {
     const loadModel = async () => {
       try {
         await tf.ready();
         await tf.setBackend('webgl'); 
-        const loadedModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+        
+        // UPGRADE: Swapped to the high-accuracy mobilenet_v2 base architecture
+        const loadedModel = await cocoSsd.load({ base: "mobilenet_v2" });
         setModel(loadedModel);
         setModelLoading(false);
       } catch (err) {
@@ -48,15 +56,13 @@ function App() {
 
   const handleUserMedia = useCallback(() => setIsStreaming(true), []);
 
-  // Handle Audio Engine Activation
   const toggleVoice = () => {
     if (!voiceEnabled) {
-      // Browsers require a speech event linked directly to a physical click to unlock the engine
       const unlockUtterance = new SpeechSynthesisUtterance("");
       window.speechSynthesis.speak(unlockUtterance);
     } else {
-      window.speechSynthesis.cancel(); // Flush the queue if turned off
-      speechMemory.current = {}; // Wipe short-term memory
+      window.speechSynthesis.cancel();
+      speechMemory.current = {};
     }
     setVoiceEnabled(!voiceEnabled);
   };
@@ -84,42 +90,83 @@ function App() {
       const ctx = canvas.getContext("2d");
       const startTime = performance.now();
 
-      const predictions = await model.detect(video, 20, 0.30);
+      // Increased base confidence threshold to 45% to filter out severe static
+      const predictions = await model.detect(video, 20, 0.45);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const now = Date.now();
+      const currentFrameClasses = predictions.map(p => p.class);
+
+      // Clean up temporal memory for objects that disappeared
+      for (const key in verificationMemory.current) {
+        if (!currentFrameClasses.includes(key)) {
+          verificationMemory.current[key] = 0; 
+          trajectoryMemory.current[key] = [];
+        }
+      }
+
+      let activeVerifiedCount = 0;
 
       predictions.forEach((prediction) => {
-        const [x, y, width, height] = prediction.bbox;
         const className = prediction.class;
-        const score = Math.round(prediction.score * 100);
-        const color = CLASS_COLORS[className] || CLASS_COLORS.default;
+        
+        // 1. TEMPORAL SMOOTHING: Increment frame counter for this class
+        verificationMemory.current[className] = (verificationMemory.current[className] || 0) + 1;
 
-        // Visual Pipeline
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        ctx.strokeRect(x, y, width, height);
-
-        const label = `${className} ${score}%`;
-        ctx.font = "bold 16px monospace";
-        const textWidth = ctx.measureText(label).width;
-        ctx.fillStyle = color;
-        ctx.fillRect(x, Math.max(0, y - 22), textWidth + 10, 22);
-        ctx.fillStyle = "#000000";
-        ctx.fillText(label, x + 5, Math.max(16, y - 4));
-
-        // Audio Pipeline
-        if (voiceEnabled && window.speechSynthesis) {
-          const lastSpokenTime = speechMemory.current[className] || 0;
+        // Only proceed with drawing and audio if it has been verified across consecutive frames
+        if (verificationMemory.current[className] >= REQUIRED_FRAMES) {
+          activeVerifiedCount++;
           
-          // 5000ms (5 second) cooldown so it doesn't stutter on the same object
-          if (now - lastSpokenTime > 5000) {
-            const utterance = new SpeechSynthesisUtterance(`${className.replace("_", " ")} detected`);
-            utterance.rate = 1.1; // Speak slightly faster
-            window.speechSynthesis.speak(utterance);
-            
-            // Record the timestamp in the memory matrix
-            speechMemory.current[className] = now;
+          const [x, y, width, height] = prediction.bbox;
+          const score = Math.round(prediction.score * 100);
+          const color = CLASS_COLORS[className] || CLASS_COLORS.default;
+
+          const centerX = x + (width / 2);
+          const centerY = y + (height / 2);
+
+          if (!trajectoryMemory.current[className]) {
+            trajectoryMemory.current[className] = [];
+          }
+          trajectoryMemory.current[className].push({ x: centerX, y: centerY });
+
+          if (trajectoryMemory.current[className].length > TRAIL_LENGTH) {
+            trajectoryMemory.current[className].shift(); 
+          }
+
+          const points = trajectoryMemory.current[className];
+          if (points.length > 1) {
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+              ctx.lineTo(points[i].x, points[i].y);
+            }
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+            ctx.stroke();
+          }
+
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x, y, width, height);
+
+          const label = `${className} ${score}%`;
+          ctx.font = "bold 16px monospace";
+          const textWidth = ctx.measureText(label).width;
+          ctx.fillStyle = color;
+          ctx.fillRect(x, Math.max(0, y - 22), textWidth + 10, 22);
+          ctx.fillStyle = "#000000";
+          ctx.fillText(label, x + 5, Math.max(16, y - 4));
+
+          if (voiceEnabled && window.speechSynthesis) {
+            const lastSpokenTime = speechMemory.current[className] || 0;
+            if (now - lastSpokenTime > 5000) {
+              const utterance = new SpeechSynthesisUtterance(`${className.replace("_", " ")} confirmed`);
+              utterance.rate = 1.1;
+              window.speechSynthesis.speak(utterance);
+              speechMemory.current[className] = now;
+            }
           }
         }
       });
@@ -132,7 +179,7 @@ function App() {
       ctx.fillRect(10, 10, 240, 50);
       ctx.fillStyle = "#00FFFF";
       ctx.font = "bold 13px sans-serif";
-      ctx.fillText(`Active Objects: ${predictions.length}`, 20, 30);
+      ctx.fillText(`Verified Targets: ${activeVerifiedCount}`, 20, 30);
       ctx.fillStyle = "#FFB300";
       ctx.fillText(`Inference: ${inferenceLatency.toFixed(1)}ms | ${currentFps.toFixed(1)} FPS`, 20, 48);
 
@@ -150,6 +197,8 @@ function App() {
       <div style={{ position: "relative", width: "100%", maxWidth: "100vw", borderRadius: "8px", overflow: "hidden", border: "2px solid #2d3748" }}>
         <Webcam
           audio={false}
+          muted={true}
+          playsInline={true}
           ref={webcamRef}
           screenshotFormat="image/jpeg"
           videoConstraints={{ facingMode: facingMode }} 
@@ -170,7 +219,6 @@ function App() {
           Switch to {facingMode === "user" ? "Rear Camera" : "Front Camera"}
         </button>
 
-        {/* New Voice Toggle Button */}
         <button
           onClick={toggleVoice}
           style={{ padding: "12px 20px", borderRadius: "6px", backgroundColor: voiceEnabled ? "#ef4444" : "#10b981", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
@@ -179,10 +227,11 @@ function App() {
         </button>
       </div>
 
-      {modelLoading && <p style={{ color: "#fbbf24", marginTop: "12px" }}>Loading Neural Weights...</p>}
+      {modelLoading && <p style={{ color: "#fbbf24", marginTop: "12px" }}>Loading High-Precision Neural Weights...</p>}
       {!modelLoading && isStreaming && <p style={{ color: "#4ade80", marginTop: "12px" }}>● Pipeline Active</p>}
     </div>
   );
 }
 
 export default App;
+      
