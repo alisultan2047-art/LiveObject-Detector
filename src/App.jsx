@@ -4,7 +4,6 @@ import * as tf from "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
 import "./App.css";
 
-// Color mapping for common classes out of the 80 total Microsoft COCO dataset categories
 const CLASS_COLORS = {
   person: "#E040FB",
   car: "#FFEB3B",
@@ -37,9 +36,8 @@ function App() {
   const speechMemory = useRef({}); 
   const verificationMemory = useRef({});
   
-  // NEW: State and memory to drive the live right-side panel safely
+  // NEW: Cumulative Session Memory for the right-hand panel
   const [detectedItems, setDetectedItems] = useState([]);
-  const lastVerifiedStr = useRef("");
 
   useEffect(() => {
     const loadModel = async () => {
@@ -105,7 +103,7 @@ function App() {
       }
 
       let activeVerifiedCount = 0;
-      const verifiedThisFrame = new Set(); // Track objects for the sidebar
+      const verifiedThisFrame = new Set(); 
 
       predictions.forEach((prediction) => {
         const className = prediction.class;
@@ -113,7 +111,7 @@ function App() {
 
         if (verificationMemory.current[className] >= REQUIRED_FRAMES) {
           activeVerifiedCount++;
-          verifiedThisFrame.add(className); // Add to active targets list
+          verifiedThisFrame.add(className); 
           
           const [x, y, width, height] = prediction.bbox;
           const score = Math.round(prediction.score * 100);
@@ -143,12 +141,25 @@ function App() {
         }
       });
 
-      // PANEL UPDATE LOGIC: Only update React state if the list of targets actually changed
-      const verifiedArray = Array.from(verifiedThisFrame).sort();
-      const currentStr = verifiedArray.join(",");
-      if (lastVerifiedStr.current !== currentStr) {
-        setDetectedItems(verifiedArray);
-        lastVerifiedStr.current = currentStr;
+      // PANEL UPDATE LOGIC: Accumulate new targets permanently 
+      if (verifiedThisFrame.size > 0) {
+        setDetectedItems(prevItems => {
+          const nextSet = new Set(prevItems);
+          let hasNewItem = false;
+          
+          verifiedThisFrame.forEach(item => {
+            if (!nextSet.has(item)) {
+              nextSet.add(item);
+              hasNewItem = true; // Flag that we found something completely new
+            }
+          });
+          
+          // Only trigger a React re-render if a genuinely new object was added to the history
+          if (hasNewItem) {
+            return Array.from(nextSet).sort();
+          }
+          return prevItems; 
+        });
       }
 
       const inferenceLatency = performance.now() - startTime;
@@ -159,7 +170,7 @@ function App() {
       ctx.fillRect(10, 10, 240, 50);
       ctx.fillStyle = "#00FFFF";
       ctx.font = "bold 13px sans-serif";
-      ctx.fillText(`Verified Targets: ${activeVerifiedCount}`, 20, 30);
+      ctx.fillText(`Live Targets in Frame: ${activeVerifiedCount}`, 20, 30);
       ctx.fillStyle = "#FFB300";
       ctx.fillText(`Latency: ${inferenceLatency.toFixed(1)}ms | ${currentFps.toFixed(1)} FPS`, 20, 48);
 
@@ -174,7 +185,6 @@ function App() {
     <div style={{ backgroundColor: "#0f1117", color: "#fff", minHeight: "100vh", padding: "16px", fontFamily: "sans-serif" }}>
       <h3 style={{ margin: "5px 0", textAlign: "center" }}>LiveObject Detector</h3>
       
-      {/* NEW: Responsive Flex Layout to separate Video and Sidebar */}
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "20px", marginTop: "16px", maxWidth: "1000px", margin: "16px auto" }}>
         
         {/* LEFT COLUMN: Camera Feed */}
@@ -215,12 +225,21 @@ function App() {
           {!modelLoading && isStreaming && <p style={{ color: "#4ade80", marginTop: "12px" }}>● Pipeline Active</p>}
         </div>
 
-        {/* RIGHT COLUMN: Live Sidebar */}
-        <div style={{ flex: "1 1 250px", backgroundColor: "#1e293b", border: "2px solid #334155", borderRadius: "8px", padding: "16px", minHeight: "300px" }}>
-          <h4 style={{ borderBottom: "1px solid #475569", paddingBottom: "10px", marginTop: "0" }}>Active Targets</h4>
+        {/* RIGHT COLUMN: Cumulative Session Log */}
+        <div style={{ flex: "1 1 250px", backgroundColor: "#1e293b", border: "2px solid #334155", borderRadius: "8px", padding: "16px", minHeight: "300px", maxHeight: "600px", overflowY: "auto" }}>
+          
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #475569", paddingBottom: "10px", marginBottom: "15px" }}>
+            <h4 style={{ margin: "0" }}>Session Log</h4>
+            <button 
+              onClick={() => setDetectedItems([])}
+              style={{ padding: "6px 12px", backgroundColor: "#ef4444", color: "white", border: "none", borderRadius: "4px", fontSize: "12px", cursor: "pointer", fontWeight: "bold" }}
+            >
+              Clear
+            </button>
+          </div>
           
           {detectedItems.length === 0 ? (
-            <p style={{ color: "#94a3b8", fontSize: "14px", fontStyle: "italic" }}>Scanning area...</p>
+            <p style={{ color: "#94a3b8", fontSize: "14px", fontStyle: "italic" }}>No objects logged yet...</p>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "12px" }}>
               {detectedItems.map((item, index) => {
