@@ -16,12 +16,10 @@ const CLASS_COLORS = {
   backpack: "#00E676",
   cell_phone: "#FF1744",
   laptop: "#FF1744",
-  cat: "#F59E0B",
-  dog: "#F59E0B",
-  tv: "#3B82F6",
   default: "#00E676"
 };
 
+// The AI must see the object 3 frames in a row to verify it (filters out glitches without causing lag)
 const REQUIRED_FRAMES = 3; 
 
 function App() {
@@ -34,16 +32,17 @@ function App() {
   
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const speechMemory = useRef({}); 
-  const verificationMemory = useRef({});
   
-  // NEW: Cumulative Session Memory for the right-hand panel
-  const [detectedItems, setDetectedItems] = useState([]);
+  // Temporal Smoothing Memory Bank (No trajectory math)
+  const verificationMemory = useRef({});
 
   useEffect(() => {
     const loadModel = async () => {
       try {
         await tf.ready();
         await tf.setBackend('webgl'); 
+        
+        // Reverted to the high-speed "lite" model to fix the lag
         const loadedModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
         setModel(loadedModel);
         setModelLoading(false);
@@ -96,6 +95,7 @@ function App() {
       const now = Date.now();
       const currentFrameClasses = predictions.map(p => p.class);
 
+      // Clean up temporal memory for objects that disappeared
       for (const key in verificationMemory.current) {
         if (!currentFrameClasses.includes(key)) {
           verificationMemory.current[key] = 0; 
@@ -103,24 +103,27 @@ function App() {
       }
 
       let activeVerifiedCount = 0;
-      const verifiedThisFrame = new Set(); 
 
       predictions.forEach((prediction) => {
         const className = prediction.class;
+        
+        // TEMPORAL SMOOTHING: Increment frame counter for this class
         verificationMemory.current[className] = (verificationMemory.current[className] || 0) + 1;
 
+        // Only draw boxes and trigger audio if verified across 3 consecutive frames
         if (verificationMemory.current[className] >= REQUIRED_FRAMES) {
           activeVerifiedCount++;
-          verifiedThisFrame.add(className); 
           
           const [x, y, width, height] = prediction.bbox;
           const score = Math.round(prediction.score * 100);
           const color = CLASS_COLORS[className] || CLASS_COLORS.default;
 
+          // Draw Box
           ctx.strokeStyle = color;
           ctx.lineWidth = 3;
           ctx.strokeRect(x, y, width, height);
 
+          // Draw Label
           const label = `${className} ${score}%`;
           ctx.font = "bold 16px monospace";
           const textWidth = ctx.measureText(label).width;
@@ -129,6 +132,7 @@ function App() {
           ctx.fillStyle = "#000000";
           ctx.fillText(label, x + 5, Math.max(16, y - 4));
 
+          // Voice Output
           if (voiceEnabled && window.speechSynthesis) {
             const lastSpokenTime = speechMemory.current[className] || 0;
             if (now - lastSpokenTime > 5000) {
@@ -141,36 +145,16 @@ function App() {
         }
       });
 
-      // PANEL UPDATE LOGIC: Accumulate new targets permanently 
-      if (verifiedThisFrame.size > 0) {
-        setDetectedItems(prevItems => {
-          const nextSet = new Set(prevItems);
-          let hasNewItem = false;
-          
-          verifiedThisFrame.forEach(item => {
-            if (!nextSet.has(item)) {
-              nextSet.add(item);
-              hasNewItem = true; // Flag that we found something completely new
-            }
-          });
-          
-          // Only trigger a React re-render if a genuinely new object was added to the history
-          if (hasNewItem) {
-            return Array.from(nextSet).sort();
-          }
-          return prevItems; 
-        });
-      }
-
       const inferenceLatency = performance.now() - startTime;
       const currentFps = 1000 / (performance.now() - lastFrameTime);
       lastFrameTime = performance.now();
 
+      // UI Telemetry
       ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
       ctx.fillRect(10, 10, 240, 50);
       ctx.fillStyle = "#00FFFF";
       ctx.font = "bold 13px sans-serif";
-      ctx.fillText(`Live Targets in Frame: ${activeVerifiedCount}`, 20, 30);
+      ctx.fillText(`Verified Targets: ${activeVerifiedCount}`, 20, 30);
       ctx.fillStyle = "#FFB300";
       ctx.fillText(`Latency: ${inferenceLatency.toFixed(1)}ms | ${currentFps.toFixed(1)} FPS`, 20, 48);
 
@@ -182,79 +166,44 @@ function App() {
   }, [isStreaming, modelLoading, model, voiceEnabled]);
 
   return (
-    <div style={{ backgroundColor: "#0f1117", color: "#fff", minHeight: "100vh", padding: "16px", fontFamily: "sans-serif" }}>
-      <h3 style={{ margin: "5px 0", textAlign: "center" }}>LiveObject Detector</h3>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", backgroundColor: "#0f1117", color: "#fff", minHeight: "100vh", padding: "16px", fontFamily: "sans-serif" }}>
+      <h3 style={{ margin: "5px 0" }}>LiveObject Detector</h3>
       
-      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "20px", marginTop: "16px", maxWidth: "1000px", margin: "16px auto" }}>
-        
-        {/* LEFT COLUMN: Camera Feed */}
-        <div style={{ flex: "1 1 600px", display: "flex", flexDirection: "column", alignItems: "center" }}>
-          <div style={{ position: "relative", width: "100%", borderRadius: "8px", overflow: "hidden", border: "2px solid #2d3748" }}>
-            <Webcam
-              audio={false}
-              muted={true}
-              playsInline={true}
-              ref={webcamRef}
-              screenshotFormat="image/jpeg"
-              videoConstraints={{ facingMode: facingMode }} 
-              onUserMedia={handleUserMedia}
-              style={{ width: "100%", height: "auto", display: "block" }}
-            />
-            <canvas
-              ref={canvasRef}
-              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }}
-            />
-          </div>
-
-          <div style={{ marginTop: "16px", display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", justifyContent: "center" }}>
-            <button
-              onClick={() => setFacingMode((prev) => (prev === "user" ? "environment" : "user"))}
-              style={{ padding: "12px 20px", borderRadius: "6px", backgroundColor: "#2563eb", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
-            >
-              Switch to {facingMode === "user" ? "Rear Camera" : "Front Camera"}
-            </button>
-            <button
-              onClick={toggleVoice}
-              style={{ padding: "12px 20px", borderRadius: "6px", backgroundColor: voiceEnabled ? "#ef4444" : "#10b981", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
-            >
-              {voiceEnabled ? "🔇 Mute AI Voice" : "🔊 Enable AI Voice"}
-            </button>
-          </div>
-
-          {modelLoading && <p style={{ color: "#fbbf24", marginTop: "12px" }}>Loading Fast Neural Weights...</p>}
-          {!modelLoading && isStreaming && <p style={{ color: "#4ade80", marginTop: "12px" }}>● Pipeline Active</p>}
-        </div>
-
-        {/* RIGHT COLUMN: Cumulative Session Log */}
-        <div style={{ flex: "1 1 250px", backgroundColor: "#1e293b", border: "2px solid #334155", borderRadius: "8px", padding: "16px", minHeight: "300px", maxHeight: "600px", overflowY: "auto" }}>
-          
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #475569", paddingBottom: "10px", marginBottom: "15px" }}>
-            <h4 style={{ margin: "0" }}>Session Log</h4>
-            <button 
-              onClick={() => setDetectedItems([])}
-              style={{ padding: "6px 12px", backgroundColor: "#ef4444", color: "white", border: "none", borderRadius: "4px", fontSize: "12px", cursor: "pointer", fontWeight: "bold" }}
-            >
-              Clear
-            </button>
-          </div>
-          
-          {detectedItems.length === 0 ? (
-            <p style={{ color: "#94a3b8", fontSize: "14px", fontStyle: "italic" }}>No objects logged yet...</p>
-          ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "12px" }}>
-              {detectedItems.map((item, index) => {
-                const color = CLASS_COLORS[item] || CLASS_COLORS.default;
-                return (
-                  <li key={index} style={{ display: "flex", alignItems: "center", gap: "12px", backgroundColor: "#0f1117", padding: "10px", borderRadius: "6px", borderLeft: `5px solid ${color}` }}>
-                    <div style={{ width: "12px", height: "12px", borderRadius: "50%", backgroundColor: color }}></div>
-                    <span style={{ textTransform: "capitalize", fontWeight: "bold", fontSize: "15px" }}>{item.replace("_", " ")}</span>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
+      <div style={{ position: "relative", width: "100%", maxWidth: "100vw", borderRadius: "8px", overflow: "hidden", border: "2px solid #2d3748" }}>
+        <Webcam
+          audio={false}
+          muted={true}
+          playsInline={true}
+          ref={webcamRef}
+          screenshotFormat="image/jpeg"
+          videoConstraints={{ facingMode: facingMode }} 
+          onUserMedia={handleUserMedia}
+          style={{ width: "100%", height: "auto", display: "block" }}
+        />
+        <canvas
+          ref={canvasRef}
+          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+        />
       </div>
+
+      <div style={{ marginTop: "16px", display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", justifyContent: "center" }}>
+        <button
+          onClick={() => setFacingMode((prev) => (prev === "user" ? "environment" : "user"))}
+          style={{ padding: "12px 20px", borderRadius: "6px", backgroundColor: "#2563eb", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
+        >
+          Switch to {facingMode === "user" ? "Rear Camera" : "Front Camera"}
+        </button>
+
+        <button
+          onClick={toggleVoice}
+          style={{ padding: "12px 20px", borderRadius: "6px", backgroundColor: voiceEnabled ? "#ef4444" : "#10b981", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
+        >
+          {voiceEnabled ? "🔇 Mute AI Voice" : "🔊 Enable AI Voice"}
+        </button>
+      </div>
+
+      {modelLoading && <p style={{ color: "#fbbf24", marginTop: "12px" }}>Loading Fast Neural Weights...</p>}
+      {!modelLoading && isStreaming && <p style={{ color: "#4ade80", marginTop: "12px" }}>● Pipeline Active</p>}
     </div>
   );
 }
